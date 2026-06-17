@@ -24,7 +24,11 @@ const logger = (...a) => {
 	}
 };
 
-export default deletedMessageArray => before("dispatch", FluxDispatcher, args => {
+/**
+ * MODIFIED: Now accepts getDeletedMessageArray function instead of Map
+ * This allows persistent storage to be accessed
+ */
+export default getDeletedMessageArray => before("dispatch", FluxDispatcher, args => {
 	if(isEnabled) {
 		try {
 			const ev = args[0];
@@ -55,7 +59,12 @@ export default deletedMessageArray => before("dispatch", FluxDispatcher, args =>
 					if (list.some(u => u.id === orig.author.id || u.username === orig.author.username)) return;
 				}
 
-				const entry = deletedMessageArray.get(ev.id);
+				/**
+				 * MODIFIED: Use persistent storage object instead of Map
+				 */
+				const deletedMessages = cfg.deletedMessages || {};
+				const entry = deletedMessages[ev.id];
+				
 				if (entry?.stage === 2) return; // Kill message normally
 				if (entry?.stage === 1) { // first pass
 					entry.stage = 2;
@@ -87,7 +96,20 @@ export default deletedMessageArray => before("dispatch", FluxDispatcher, args =>
 				ev.isPushNotification = false;
 				
 
-				deletedMessageArray.set(ev.id, { message: args, stage: 1 });
+				/**
+				 * MODIFIED: Save to persistent storage with timestamp
+				 * This data survives plugin restarts!
+				 */
+				deletedMessages[ev.id] = { 
+					message: args, 
+					stage: 1,
+					timestamp: now(),  // Add timestamp for sorting during purge
+					author: orig.author,
+					content: orig.content,
+					channel_id: orig.channel_id || ev.channelId,
+					guild_id: guildId
+				};
+				storage.deletedMessages = deletedMessages;
 
 				return args;
 			}
