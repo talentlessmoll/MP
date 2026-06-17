@@ -74,10 +74,23 @@ makeDefaults(storage, {
 		editHistoryIcon: "ic_edit_24px"
 	},
 	debug: false,
-	debugUpdateRows: false
+	debugUpdateRows: false,
+	// === PERSISTENT STORAGE SETTING ===
+	deletedMessages: {} // Persistent storage of deleted messages
 })
 
-const deletedMessageArray = new Map();
+/**
+ * Get the persistent deleted messages object
+ * All deleted messages are now stored here instead of temporary Map
+ * This survives plugin restarts!
+ */
+const getDeletedMessageArray = () => {
+	if (!storage.deletedMessages) {
+		storage.deletedMessages = {};
+	}
+	return storage.deletedMessages;
+};
+
 let unpatch = null;
 
 // these value are hardocoded simply i dont trust users would actively keep it low. for their own sake tbf
@@ -88,13 +101,13 @@ const DELETE_EACH_CYCLE = 140;              // how many we purge for each cycle
 
 // [Function, ArrayOfArguments]
 const patches = [
-	[fluxDispatchPatch,   	[deletedMessageArray]],
-	[updateRowsPatch,     	[deletedMessageArray]],
+	[fluxDispatchPatch,   	[getDeletedMessageArray]],  // Pass function instead of Map
+	[updateRowsPatch,     	[getDeletedMessageArray]],  // Pass function instead of Map
 	[selfEditPatch,       	[]],                 	// no args
 	[createMessageRecord, 	[]],
 	[messageRecordDefault,	[]],
 	[updateMessageRecord, 	[]],
-	[actionsheet,         	[deletedMessageArray]]
+	[actionsheet,         	[getDeletedMessageArray]]   // Pass function instead of Map
 ];
 
 // helper func
@@ -120,16 +133,27 @@ export default {
 			stopPlugin(id)		
 		};
 
+		/**
+		 * MODIFIED: Cache purge now uses persistent storage
+		 * Sorts by timestamp to delete oldest messages first
+		 */
 		intervalPurge = setInterval(() => {
-			if (deletedMessageArray.size <= KEEP_NEWEST) return;
-
-			const toDelete = Math.min(DELETE_EACH_CYCLE, deletedMessageArray.size - KEEP_NEWEST);
-			let i = 0;
-
-			for (const key of deletedMessageArray.keys()) {
-				deletedMessageArray.delete(key);
-				if (++i >= toDelete) break;
-			}
+			const deletedMessages = getDeletedMessageArray();
+			const keys = Object.keys(deletedMessages);
+			
+			if (keys.length <= KEEP_NEWEST) return;
+			
+			const toDelete = Math.min(DELETE_EACH_CYCLE, keys.length - KEEP_NEWEST);
+			
+			// Sort by timestamp (oldest first) and delete oldest messages
+			keys
+				.sort((a, b) => (deletedMessages[a].timestamp || 0) - (deletedMessages[b].timestamp || 0))
+				.slice(0, toDelete)
+				.forEach(key => {
+					delete deletedMessages[key];
+				});
+			
+			storage.deletedMessages = deletedMessages;
 		}, 15 * 60 * 1000);  // 15 min check to purge caches
 
 		// apply custom name if override enabled
@@ -138,6 +162,20 @@ export default {
 			plugin?.manifest?.name;
 
 	},
+	
+	/**
+	 * MODIFIED: onUnload no longer deletes messages!
+	 * 
+	 * OLD BEHAVIOR:
+	 * - When plugin unloaded, it would send MESSAGE_DELETE events for all logged messages
+	 * - This permanently deleted them from Discord
+	 * - This is why messages didn't persist after restart
+	 * 
+	 * NEW BEHAVIOR:
+	 * - Plugin just unloads cleanly
+	 * - All messages stored in storage.deletedMessages persist
+	 * - Next time plugin loads, messages are restored automatically
+	 */
 	onUnload: () => {
 		isEnabled = false;
         
@@ -145,20 +183,18 @@ export default {
         
         unpatch?.()
 
-        // cleaning records
-		for (const channelId in ChannelMessages._channelMessages) {
-			for (const message of ChannelMessages._channelMessages[channelId]._array) {
-				if(message.was_deleted) {
-					FluxDispatcher.dispatch({
-						type: "MESSAGE_DELETE",
-						id: message.id,
-						channelId: message.channel_id,
-						otherPluginBypass: true,
-					});
-				}
-			}
-		}
-
+        // ✅ REMOVED: The automatic deletion loop that used to be here
+        // OLD CODE WAS:
+        // for (const channelId in ChannelMessages._channelMessages) {
+        //     for (const message of ChannelMessages._channelMessages[channelId]._array) {
+        //         if(message.was_deleted) {
+        //             FluxDispatcher.dispatch({...})  <- This deleted everything!
+        //         }
+        //     }
+        // }
+        
+        // Now messages just persist in storage.deletedMessages
+        logger.info("[ANTIED] Plugin unloaded. Messages saved in persistent storage.");
 	},
 	settings: SettingPage
 }
